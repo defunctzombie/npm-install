@@ -1,4 +1,5 @@
 var fs = require('fs');
+var crypto = require('crypto');
 var path = require('path');
 var zlib = require('zlib');
 var spawn = require('child_process').spawn;
@@ -6,10 +7,10 @@ var debug = require('debug')('npm-install');
 var barrage = require('barrage');
 var fetch = require('npm-fetch');
 var after = require('after');
-var temp = require('temp');
 var inorder = require('in-order');
 var rimraf = require('rimraf');
 var tar = require('tar');
+var osenv = require('osenv');
 
 // setup gyp command for spawn
 var gyp_cmd = path.resolve(require.resolve('node-gyp'), '..', '../bin/node-gyp.js');
@@ -45,7 +46,7 @@ function read_pkg_json(fullpath, cb) {
 // or full package path as well module:submodule:submodule
 // also, 'stdout', 'stderr'
 
-function perform_install(name, spec, pkg_path, destination, cb) {
+function perform_install(name, spec, tarfile, destination, cb) {
 
     if (fs.existsSync(destination)) {
         // remove symlinks nicely
@@ -58,34 +59,71 @@ function perform_install(name, spec, pkg_path, destination, cb) {
         }
     }
 
-    var items = fs.readdirSync(pkg_path);
+    var tar_opt = {
+        path: destination,
+        strip: 1
+    };
 
-    if (items.length !== 1) {
-        return cb(new Error('unexpected number of items in donwload dir'));
-    }
-
-    pkg_path = path.join(pkg_path, items[0]);
-
-    fs.renameSync(pkg_path, destination);
-
-    // install the deps for the module we installed
-    install(destination, function(err) {
-        if (err) {
-            return cb(err);
-        }
-
-        // run build in final_dest
-        build(destination, function(err) {
+    fs.createReadStream(tarfile)
+    .pipe(zlib.createGunzip())
+    .pipe(tar.Extract(tar_opt))
+    .on('error', cb)
+    .on('end', function(err) {
+        // install the deps for the module we installed
+        install(destination, function(err) {
             if (err) {
                 return cb(err);
             }
 
-            // install specfile
-            var specfile = path.join(destination, '.npm-install-info');
-            var key = name + ':' + spec;
-            fs.writeFileSync(specfile, key);
-            cb();
+            // run build in final_dest
+            build(destination, function(err) {
+                if (err) {
+                    return cb(err);
+                }
+
+                // install specfile
+                var specfile = path.join(destination, '.npm-install-info');
+                var key = name + ':' + spec;
+                fs.writeFileSync(specfile, key);
+                cb();
+            });
         });
+    });
+}
+
+// fetch tar file for the given name and spec from cache
+// callback with local disk location of tar file
+var pacman = function(name, spec, cb) {
+    var cache_dir = path.join(osenv.home(), '.npminstall');
+
+    // TODO never cache '*' items
+    // lookup latest version for * in registry?
+
+    // cache ~##.##.## without the loading ~
+    // This allows for exact pinned versions and ~ versions that match
+    // to hit the same cache item
+    if (spec && /^~\d+[.]\d+[.]\d+$/.test(spec)) {
+        spec = spec.replace('~', '');
+    }
+
+    if (!fs.existsSync(cache_dir)) {
+        fs.mkdirSync(cache_dir);
+    }
+
+    var key = crypto.createHash('md5')
+        .update(name).update(spec)
+        .digest('hex');
+
+    var tarfile = path.join(cache_dir, key + '.tar.gz');
+
+    if (fs.existsSync(tarfile)) {
+        return cb(null, tarfile);
+    }
+
+    fetch(name, spec, {})
+    .syphon(barrage(fs.createWriteStream(tarfile)))
+    .wait(function(err) {
+        cb(err, tarfile);
     });
 }
 
@@ -112,22 +150,17 @@ function install(where, cb) {
             fs.mkdirSync(module_dir);
         }
 
-        // TODO
-        // we can download the deps in parallel
-        // but we should do the actual install in order
-
         // deps we have downloaded cause we need to install them
         var downloaded_deps = [];
 
         var done = after(deps.length, function(err) {
             if (err) {
-                // TODO remove all temp dirs?
                 return cb(err);
             }
 
             // loop deps and install each dep
             inorder(downloaded_deps, function(dep, done) {
-                perform_install(dep.name, dep.spec, dep.pkg_path, dep.destination, done);
+                perform_install(dep.name, dep.spec, dep.tarfile, dep.destination, done);
             }, cb)
         });
 
@@ -155,21 +188,7 @@ function install(where, cb) {
                 }
             }
 
-            console.log('downloading %s : %s', dep.name, dep.spec);
-
-            var tar_opt = {
-                path: temp.path({ prefix: 'npminstall-' })
-            };
-
-            process.setMaxListeners(0);
-            process.once('exit', function() {
-                rimraf.sync(tar_opt.path, function() {});
-            });
-
-            fetch(dep.name, dep.spec, {})
-            .syphon(barrage(zlib.createGunzip()))
-            .syphon(barrage(tar.Extract(tar_opt)))
-            .wait(function(err) {
+            pacman(dep.name, dep.spec, function(err, tarfile) {
                 if (err) {
                     return done(err);
                 }
@@ -178,10 +197,10 @@ function install(where, cb) {
                     name: dep.name,
                     spec: dep.spec,
                     destination: final_dest,
-                    pkg_path: tar_opt.path
+                    tarfile: tarfile
                 });
 
-                return done();
+                done();
             });
         });
     });
