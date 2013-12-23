@@ -1,0 +1,16 @@
+{
+    "name": "npm-install",
+    "version": "0.0.0",
+    "main": "./index.js",
+    "bin": "./bin/npm-install",
+    "dependencies": {
+        "debug": "0.7.4",
+        "barrage": "1.0.0",
+        "after": "0.8.1",
+        "in-order": "0.1.1",
+        "rimraf": "2.2.5",
+        "temp": "0.6.0",
+        "npm-fetch": "ForbesLindesay/npm-fetch#260c8be",
+        "node-gyp": "0.12.2"
+    }
+}

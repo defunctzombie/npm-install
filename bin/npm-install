@@ -1,0 +1,12 @@
+#!/usr/bin/env node
+var path = require('path');
+var install = require('../');
+
+install(process.cwd(), function(err) {
+    if (err) {
+        console.error(err.stack);
+        return process.exit(1);
+    }
+
+    process.exit(0);
+});
